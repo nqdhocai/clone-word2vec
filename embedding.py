@@ -7,7 +7,7 @@ import torch.optim as optim
 
 
 class Tokenizer:
-    def __init__(self, max_length = 50, vocab_size = 1000):
+    def __init__(self, max_length = 50, vocab_size = 10000):
         self.vocab = {}
         self.vocab_size = vocab_size
         self.oov_token = None
@@ -15,7 +15,7 @@ class Tokenizer:
 
     def fit(self, sentences, oov_token='<OOV>'):
         self.oov_token = oov_token
-        stop_word = ['.', '!', '?']
+        stop_word = ['.', '!', '?', '/']
         tokens = []
         for sentence in sentences:
             for i in stop_word:
@@ -74,18 +74,21 @@ class Embedding(nn.Module):
         input_size = self.tokenizer.max_length
         self.fc1 = nn.Linear(input_size, embedding_dim)
         self.fc2 = nn.Linear(embedding_dim, input_size)
+        self.fc3 = nn.Linear(embedding_dim, input_size)
+        self.activation = nn.Softmax()
 
     def forward(self, x):
         out = self.fc1(x)
-        out = self.fc2(out)
+        out = self.fc2(out) + self.fc3(out)
         return out
 
     def dataset(self, sentences):
         self.tokenizer.fit(sentences)
         data = self.tokenizer.transform(sentences)
+        data_temp = data.copy()
         for pos, vec in enumerate(data):
             for i, num in enumerate(vec):
-                temp = [0 for _ in range(self.tokenizer.vocab_size)]
+                temp = [0 for _ in range(len(self.tokenizer.vocab))]
                 if num == 0:
                     vec[i] = temp
                 x = num
@@ -94,14 +97,19 @@ class Embedding(nn.Module):
         x_train = torch.tensor(data, dtype=torch.float).permute(0, 2, 1)
         for pos, vec in enumerate(data):
             vec.pop(-1)
-            vec.insert(0, [0 for _ in range(self.tokenizer.vocab_size)])
+            vec.insert(0, [0 for _ in range(len(self.tokenizer.vocab))])
             data[pos] = vec
 
-        y_train = torch.tensor(data, dtype=torch.float).permute(0, 2, 1)
+        for pos, vec in enumerate(data_temp):
+            vec.pop(0)
+            vec.insert(-1, [0 for _ in range(len(self.tokenizer.vocab))])
+            data_temp[pos] = vec
+
+        y_train = torch.tensor(data, dtype=torch.float).permute(0, 2, 1) + torch.tensor(data_temp, dtype=torch.float).permute(0, 2, 1)
 
         return x_train, y_train
 
-    def fit(self, sentences, num_epochs=10, batch_size=64, learning_rate=0.001):
+    def fit(self, sentences, num_epochs=100, batch_size=64, learning_rate=0.001):
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(self.parameters(), lr=learning_rate)
 
@@ -133,19 +141,3 @@ class Embedding(nn.Module):
         out = torch.tensor(self.tokenizer.transform(x), dtype=torch.float)
         out = self.fc1(out)
         return out
-
-
-# Load data
-data = pd.read_json('E:\CODE-Codespace\JB-Pycharm\\train_data.json')
-data = data.drop(columns=['id', 'diagramRef'])
-
-sentences = [
-    'toi ten la dung.',
-    'toi hoc dai hoc bkhn!'
-]
-vocab_size = 100
-
-test = ['mai la thu 3']
-embedd = Embedding(5)
-embedd.fit(sentences)
-print(embedd.transform(test))
