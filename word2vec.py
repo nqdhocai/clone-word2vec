@@ -1,82 +1,143 @@
-import collections
+import math
+
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
 
-class Vocab:
-    def __init__(self, corpus, min_freq=0, token='word'):
-        tokens = self.tokenize(corpus, token=token)
-        reserved_tokens = []
-        # Sort according to frequencies
-        counter = self.count_corpus(tokens)
-        self.token_freqs = sorted(counter.items(), key=lambda x: x[0])
-        self.token_freqs.sort(key=lambda x: x[1], reverse=True)
-        self.unk, uniq_tokens = 0, ['<unk>'] + reserved_tokens
-        uniq_tokens += [token for token, freq in self.token_freqs
-                        if freq >= min_freq and token not in uniq_tokens]
-        self.idx_to_token, self.token_to_idx = [], dict()
-        for token in uniq_tokens:
-            self.idx_to_token.append(token)
-            self.token_to_idx[token] = len(self.idx_to_token) - 1
-
-    def __len__(self):
-        return len(self.idx_to_token)
-
-    def __getitem__(self, tokens):
-        if not isinstance(tokens, (list, tuple)):
-            return self.token_to_idx.get(tokens, self.unk)
-        return [self.__getitem__(token) for token in tokens]
-
-    def to_tokens(self, indices):
-        if not isinstance(indices, (list, tuple)):
-            return self.idx_to_token[indices]
-        return [self.idx_to_token[index] for index in indices]
-
-    def count_corpus(self, sentences):
-        # Flatten a list of token lists into a list of tokens
-        tokens = [tk for line in sentences for tk in line]
-        return collections.Counter(tokens)
-
-    def tokenize(self, corpus, token='word'):
-        """Split sentences into word or char tokens."""
-        if token == 'word':
-            return [sentence.split(' ') for sentence in corpus]
-        elif token == 'char':
-            return [list(sentence) for sentence in corpus]
-        else:
-            print('ERROR: unknown token type ' + token)
-
-
 class Tokenizer:
-    def __init__(self, vocab=None, token='word', max_length=32):
-        self.token = token
+    def __init__(self, max_length = 50, vocab_size = 10000):
+        self.vocab = {}
+        self.vocab_size = vocab_size
+        self.oov_token = None
         self.max_length = max_length
-        if vocab != None:
-            self.vocab = vocab
-        else:
-            self.vocab = Vocab(corpus=[], token=token)
 
-    def tokenize(self, corpus, token='word'):
-        """Split sentences into word or char tokens."""
-        if token == 'word':
-            return [sentence.split(' ') for sentence in corpus]
-        elif token == 'char':
-            return [list(sentence) for sentence in corpus]
-        else:
-            print('ERROR: unknown token type ' + token)
+    def fit(self, sentences, oov_token='<OOV>'):
+        self.oov_token = oov_token
+        stop_word = ['.', '!', '?', '/']
+        tokens = []
+        for sentence in sentences:
+            for i in stop_word:
+                sentence.replace(i, '')
+            tokens.extend(sentence.split(' '))
+
+        words = list(set(tokens))
+        vocab = {word: 0 for word in words}
+        vocab[oov_token] = 0
+
+        for token in tokens:
+            if token not in words:
+                vocab[oov_token] += 1
+            else:
+                vocab[token] += 1
+
+        vocab = list(sorted(vocab.items(), key=lambda item: item[1]))
+        count = 0
+        for rank in range(1, len(vocab) + 1):
+            if count == self.vocab_size:
+                break
+            word = vocab[rank - 1][0]
+            self.vocab[word] = rank
+            count += 1
 
     def transform(self, sentences):
-        tokens = self.tokenize(sentences, token=self.token)
-        encode_tokens = []
-        for token in tokens:
-            temp = self.vocab[token]
-            if len(temp) >= self.max_length:
-                temp = temp[:self.max_length]
-                encode_tokens.append(temp)
-                continue
+        tokened = []
+        for sentence in sentences:
+            token = sentence.split(' ')
+            for i in range(len(token)):
+                word = token[i]
+                if word not in self.vocab:
+                    token[i] = self.vocab[self.oov_token]
+                else:
+                    token[i] = self.vocab[word]
+            tokened.append(token)
+        return self.add_padding(tokened)
+
+    def add_padding(self, tokened):
+        max_length = self.max_length
+        tokened_size = len(tokened)
+        for i in range(tokened_size):
+            if len(tokened[i]) < max_length:
+                pad = [0 for _ in range(max_length - len(tokened[i]))]
+                pad.extend(tokened[i])
+                tokened[i] = pad
 
             else:
-                temp.extend([0]*(self.max_length-len(temp)))
-                encode_tokens.append(temp)
-        return encode_tokens
+                tokened[i] = tokened[i][:max_length]
+        return tokened
+
+class Embedding(nn.Module):
+    def __init__(self, embedding_dim, max_length = 50, vocab_size = 1000):
+        super(Embedding, self).__init__()
+        self.tokenizer = Tokenizer(max_length, vocab_size)
+        input_size = self.tokenizer.max_length
+        self.fc1 = nn.Linear(input_size, embedding_dim)
+        self.fc2 = nn.Linear(embedding_dim, input_size)
+        self.fc3 = nn.Linear(embedding_dim, input_size)
+        self.activation = nn.Softmax()
+
+    def forward(self, x):
+        out = self.fc1(x)
+        out = self.fc2(out) + self.fc3(out)
+        return out
+
+    def dataset(self, sentences):
+        self.tokenizer.fit(sentences)
+        data = self.tokenizer.transform(sentences)
+        data_temp = data.copy()
+        for pos, vec in enumerate(data):
+            for i, num in enumerate(vec):
+                temp = [0 for _ in range(len(self.tokenizer.vocab))]
+                if num == 0:
+                    vec[i] = temp
+                x = num
+                vec[i] = temp.copy()
+                vec[i][x-1] = 1
+        x_train = torch.tensor(data, dtype=torch.float).permute(0, 2, 1)
+        for pos, vec in enumerate(data):
+            vec.pop(-1)
+            vec.insert(0, [0 for _ in range(len(self.tokenizer.vocab))])
+            data[pos] = vec
+
+        for pos, vec in enumerate(data_temp):
+            vec.pop(0)
+            vec.insert(-1, [0 for _ in range(len(self.tokenizer.vocab))])
+            data_temp[pos] = vec
+
+        y_train = torch.tensor(data, dtype=torch.float).permute(0, 2, 1) + torch.tensor(data_temp, dtype=torch.float).permute(0, 2, 1)
+
+        return x_train, y_train
+
+    def fit(self, sentences, num_epochs=100, batch_size=64, learning_rate=0.001):
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+
+        x_train, y_train = self.dataset(sentences)
+
+        current_loss=100
+        for epoch in range(num_epochs):
+            for i in range(len(x_train)):
+                inputs = x_train[i]
+                targets = y_train[i]
+
+                # Lan truyền tiến
+                outputs = self(inputs)
+
+                # Tính toán độ lỗi
+                loss = criterion(outputs, targets)
+
+                # Lan truyền ngược và cập nhật trọng số
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            if math.fabs(loss.item() - current_loss) <= 10 ** -8:
+                break
+                # Update Current loss
+            current_loss = loss.item()
+
+    def transform(self, x):
+        out = torch.tensor(self.tokenizer.transform(x), dtype=torch.float)
+        out = self.fc1(out)
+        return out
